@@ -27,13 +27,15 @@ from config import (
 model = None
 model_surfaces = None
 trigger_enabled = True
+capture_enabled = True
 
 
 def initialize_model(parameter_names=None, iron=None, tally=None, transport_options=None,
-                     use_trigger=True):
+                     use_trigger=True, capture_images=True):
     """Generate a fresh model before starting an optimization or sweep."""
-    global model, model_surfaces, trigger_enabled
+    global model, model_surfaces, trigger_enabled, capture_enabled
     trigger_enabled = use_trigger
+    capture_enabled = capture_images
     openmc.reset_auto_ids()
     model = generate_model(parameter_names=parameter_names, iron=iron, tally=tally, transport_options=transport_options)
     model_surfaces = model.geometry.get_all_surfaces()
@@ -180,15 +182,18 @@ def evaluate_current_parameter(run_index=0, plot_extent=None,
     names = (SURFACE_PARAMETER_NAME,) if parameter_names is None else parameter_names
     parameter_value = get_parameters(names)
     print(f"Evaluating parameter {names} = {parameter_value} cm for run index {run_index}.")
-    if plot_extent is None:
+    if capture_enabled and plot_extent is None:
         plot_extent = (parameter_plot_extent(get_constraints()[1]) if parameter_names is None
                        else optimization_plot_extent(names, [get_constraints(name) for name in names]))
     with openmc.lib.run_in_memory(args=runtime_args, output=False):
-        image, image_extent, image_plot_extent = geometry_plots.render_current_parameter(
-            model, run_index, plot_extent,
-            parameter_names=names if parameter_names is not None else None,
-            return_extent=True,
-        )
+        if capture_enabled:
+            image, image_extent, image_plot_extent = geometry_plots.render_current_parameter(
+                model, run_index, plot_extent,
+                parameter_names=names if parameter_names is not None else None,
+                return_extent=True,
+            )
+        else:
+            image = image_extent = image_plot_extent = None
         openmc.lib.simulation_init()
         tally = openmc.lib.tallies[1]
         geom_derivative = openmc.lib.geometry_derivatives[1]
@@ -212,7 +217,7 @@ def evaluate_current_parameter(run_index=0, plot_extent=None,
                 dJ=components(geom_derivative.dJ / normalization),
                 datt=components(geom_derivative.datt / normalization),
                 image=image,
-                mesh=capture_mesh_tally(model),
+                mesh=capture_mesh_tally(model) if capture_enabled else None,
                 image_extent=image_extent,
                 plot_extent=image_plot_extent,
             )
@@ -352,7 +357,7 @@ def optimize_parameter(output_path='optimization_history.npy',
                        hop_iterations=BASIN_HOP_ITERATIONS,
                        hop_step_fraction=BASIN_HOP_STEP_FRACTION,
                        hop_temperature=BASIN_HOP_TEMPERATURE, hop_seed=BASIN_HOP_SEED,
-                       transport_options=None, use_trigger=True):
+                       transport_options=None, use_trigger=True, capture_images=True):
     """Minimize water flux and save every objective evaluation in run order."""
     if method not in ('local', 'basinhopping'):
         raise ValueError('Optimization method must be local or basinhopping.')
@@ -361,7 +366,8 @@ def optimize_parameter(output_path='optimization_history.npy',
             or not np.isfinite(hop_temperature) or hop_temperature < 0):
         raise ValueError('Hops must be a nonnegative integer, step fraction positive, and temperature nonnegative.')
     names = validate_parameter_names(OPTIMIZATION_PARAMETER_NAMES if parameter_names is None else parameter_names)
-    initialize_model(names, transport_options=transport_options, use_trigger=use_trigger)
+    initialize_model(names, transport_options=transport_options, use_trigger=use_trigger,
+                     capture_images=capture_images)
     initial_value = get_parameters(names)
     print("Initial iron sphere parameter:", initial_value)
     bounds = [get_constraints(name) for name in names]
@@ -373,7 +379,7 @@ def optimize_parameter(output_path='optimization_history.npy',
     }
     samples = []
     convergence = ParameterConvergence(initial_value)
-    plot_extent = optimization_plot_extent(names, bounds)
+    plot_extent = optimization_plot_extent(names, bounds) if capture_images else None
     objective = partial(
         flux_objective, samples=samples, plot_extent=plot_extent,
         output_path=output_path, use_jac=use_jac, parameter_names=names,
