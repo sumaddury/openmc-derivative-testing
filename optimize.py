@@ -26,13 +26,16 @@ from config import (
 
 model = None
 model_surfaces = None
+trigger_enabled = True
 
 
-def initialize_model(parameter_names=None, iron=None, tally=None):
+def initialize_model(parameter_names=None, iron=None, tally=None, transport_options=None,
+                     use_trigger=True):
     """Generate a fresh model before starting an optimization or sweep."""
-    global model, model_surfaces
+    global model, model_surfaces, trigger_enabled
+    trigger_enabled = use_trigger
     openmc.reset_auto_ids()
-    model = generate_model(parameter_names=parameter_names, iron=iron, tally=tally)
+    model = generate_model(parameter_names=parameter_names, iron=iron, tally=tally, transport_options=transport_options)
     model_surfaces = model.geometry.get_all_surfaces()
     if parameter_names is not None:
         # The driver must differentiate the coordinates it will evaluate,
@@ -140,6 +143,8 @@ class ParameterConvergence:
 
 def configure_tally_trigger():
     """Apply a relative-error trigger to the flux tally."""
+    if not trigger_enabled:
+        return
     configure_trigger(model, 1, FLUX_TRIGGER_REL_ERR,
                       TRIGGER_MAX_BATCHES_FACTOR, TRIGGER_BATCH_INTERVAL)
 
@@ -316,6 +321,10 @@ def model_metadata():
         'initial_iron': {name: float(model_surfaces[1].coefficients[name])
                          for name in ('r', 'x0', 'y0', 'z0')},
         'tally': {'score': current_tally.scores[0], 'estimator': current_tally.estimator},
+        'batches': int(model.settings.batches),
+        'particles': int(model.settings.particles),
+        'seed': model.settings.seed,
+        'trigger': bool(trigger_enabled),
     }
 
 
@@ -342,7 +351,8 @@ def optimize_parameter(output_path='optimization_history.npy',
                        use_jac=True, parameter_names=None, method=OPTIMIZATION_METHOD,
                        hop_iterations=BASIN_HOP_ITERATIONS,
                        hop_step_fraction=BASIN_HOP_STEP_FRACTION,
-                       hop_temperature=BASIN_HOP_TEMPERATURE, hop_seed=BASIN_HOP_SEED):
+                       hop_temperature=BASIN_HOP_TEMPERATURE, hop_seed=BASIN_HOP_SEED,
+                       transport_options=None, use_trigger=True):
     """Minimize water flux and save every objective evaluation in run order."""
     if method not in ('local', 'basinhopping'):
         raise ValueError('Optimization method must be local or basinhopping.')
@@ -351,7 +361,7 @@ def optimize_parameter(output_path='optimization_history.npy',
             or not np.isfinite(hop_temperature) or hop_temperature < 0):
         raise ValueError('Hops must be a nonnegative integer, step fraction positive, and temperature nonnegative.')
     names = validate_parameter_names(OPTIMIZATION_PARAMETER_NAMES if parameter_names is None else parameter_names)
-    initialize_model(names)
+    initialize_model(names, transport_options=transport_options, use_trigger=use_trigger)
     initial_value = get_parameters(names)
     print("Initial iron sphere parameter:", initial_value)
     bounds = [get_constraints(name) for name in names]
@@ -405,12 +415,14 @@ def optimize_parameter(output_path='optimization_history.npy',
 
 def collect_parameter_sweep(num_values=100, output_path='parameter_sweep.npy',
                             parameter=SURFACE_PARAMETER_NAME, bounds=None,
-                            iron=None, tally=None, case_name=None):
+                            iron=None, tally=None, case_name=None,
+                            transport_options=None, use_trigger=True):
     """Save scalar sweep results and geometry images in a single NumPy file."""
     # Check supplied options before building the model needed for default bounds.
     validate_sweep_options(parameter, bounds, num_values, iron, tally)
     names = validate_parameter_names((parameter,))
-    initialize_model(names, iron=iron, tally=tally)
+    initialize_model(names, iron=iron, tally=tally, transport_options=transport_options,
+                     use_trigger=use_trigger)
     bounds = get_constraints(parameter) if bounds is None else bounds
     options = validate_sweep_options(parameter, bounds, num_values, iron, tally)
     initial_parameter = get_parameters(names)
@@ -472,12 +484,30 @@ def main():
                         help='Temperature for accepting uphill basins, in objective units.')
     parser.add_argument('--hop-seed', type=int, default=BASIN_HOP_SEED,
                         help='Random seed for reproducible basin jumps.')
+    parser.add_argument('--batches', type=int,
+                        help='Batches per transport run (default: model.py value).')
+    parser.add_argument('--particles', type=int,
+                        help='Particles per batch, i.e. the batch size (default: model.py value).')
+    parser.add_argument('--seed', type=int,
+                        help='OpenMC transport random seed (default: OpenMC default). Separate from --hop-seed.')
+    parser.add_argument('--no-trigger', action='store_true',
+                        help='Run exactly the requested batches, without the relative-error trigger.')
     args = parser.parse_args()
+    transport_options = {key: value for key, value in
+                         (('batches', args.batches), ('particles', args.particles),
+                          ('seed', args.seed))
+                         if value is not None}
+    if any(value < 1 for value in transport_options.values()):
+        parser.error('--batches, --particles and --seed must be positive integers.')
     if args.all_cases or args.cases is not None:
         if not args.sweep:
             parser.error('--all-cases and --cases require --sweep.')
         if args.output is not None or args.num_values is not None:
             parser.error('Named cases use their configured point counts and --output-dir; omit -n and -o.')
+        if transport_options:
+            parser.error('--batches, --particles and --seed apply to optimization and single sweeps, not named cases.')
+        if args.no_trigger:
+            parser.error('--no-trigger applies to optimization and single sweeps, not named cases.')
         try:
             collect_sweep_cases(args.cases, args.output_dir or 'results')
         except ValueError as error:
@@ -487,10 +517,14 @@ def main():
         parser.error('--output-dir requires --all-cases or --cases.')
     if args.sweep:
         collect_parameter_sweep(100 if args.num_values is None else args.num_values,
-                                args.output or 'parameter_sweep.npy')
+                                args.output or 'parameter_sweep.npy',
+                                transport_options=transport_options or None,
+                                use_trigger=not args.no_trigger)
         return
     result = optimize_parameter(args.output or 'optimization_history.npy',
                                 use_jac=not args.no_jac,
+                                transport_options=transport_options or None,
+                                use_trigger=not args.no_trigger,
                                 method=args.method, hop_iterations=args.hops,
                                 hop_step_fraction=args.hop_step_fraction,
                                 hop_temperature=args.hop_temperature, hop_seed=args.hop_seed)

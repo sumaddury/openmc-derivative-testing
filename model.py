@@ -2,8 +2,17 @@ import openmc
 
 from config import OPTIMIZATION_PARAMETER_NAMES
 
-def build_model(parameter_names=None, iron=None, tally=None):
+def build_model(parameter_names=None, iron=None, tally=None, transport_options=None):
     """Build a fresh model with stable IDs for simulation workflows."""
+    
+    # Default params for batch size and number
+    transport = {
+        "batches" : 100,
+        "particles" : 1_000_000,
+        "seed" : None
+    }
+    transport.update(transport_options or {})
+
     iron_parameters = {'x0': 5, 'y0': 2, 'z0': 0, 'r': 2}
     iron_parameters.update(iron or {})
     tally_options = {'score': 'flux'}
@@ -66,8 +75,10 @@ def build_model(parameter_names=None, iron=None, tally=None):
     settings = openmc.Settings()
     settings.run_mode = 'fixed source'
     settings.source = source
-    settings.batches = 100
-    settings.particles = 1_000_000
+    settings.batches = transport["batches"]
+    settings.particles = transport["particles"]
+    if transport["seed"] is not None:
+        settings.seed = transport["seed"]
 
     # ---------------------------------------------------------------------------
     # Tallies
@@ -76,7 +87,7 @@ def build_model(parameter_names=None, iron=None, tally=None):
     flux_tally = openmc.Tally(tally_id=1, name='water_flux')
     flux_tally.filters = [water_filter]
     flux_tally.scores = [tally_options['score']]
-    # flux_tally.estimator = 'collision'
+    flux_tally.estimator = 'collision'
 
     # mesh flux tally
     mesh = openmc.RegularMesh(mesh_id=1)
@@ -105,9 +116,9 @@ def build_model(parameter_names=None, iron=None, tally=None):
     return model
 
 
-def main(output_path="model.xml", parameter_names=None, iron=None, tally=None):
+def main(output_path="model.xml", parameter_names=None, iron=None, tally=None, transport_options=None):
     """Generate and export the model used by optimization and sweeps."""
-    model = build_model(parameter_names, iron=iron, tally=tally)
+    model = build_model(parameter_names, iron=iron, tally=tally, transport_options=transport_options)
     model.export_to_model_xml(output_path)
     return model
 
