@@ -8,6 +8,8 @@ import sys
 
 import numpy as np
 
+from .adaptive_batches import AdaptiveBatches
+from .batches import record_batches
 from .runtime import atomic_write, configure_trigger
 from .progress import phase, run_logged
 
@@ -76,7 +78,8 @@ def evaluate(mesh_path, directory, settings, seed, budget=1, *, batch_scores=Fal
     if settings_kind != 'int':
         raise ValueError('Unknown evaluation settings kind')
     directory = Path(directory).resolve()
-    batch_scores = batch_scores or settings.paired_sampling
+    batch_scores = (batch_scores or settings.paired_sampling or settings.record_batches
+                    or settings.adaptive_batches.enabled)
     directory.mkdir(parents=True, exist_ok=False)
     mesh_path = Path(mesh_path).resolve()
     settings_path = directory / 'settings.json'
@@ -145,17 +148,9 @@ def worker(mesh_path, directory, settings, seed, budget, *, batch_scores=False, 
             # nearby meshes with the same source-history random seeds.
             if model.settings.run_mode != 'fixed source' or settings.trigger_max_factor != 1:
                 raise ValueError('Batch scoring requires fixed-source, fixed-budget transport')
-            flux_batches = []
-            previous_sum = 0.
-            openmc.lib.simulation_init()
-            for _ in openmc.lib.iter_batches():
-                tally = openmc.lib.tallies[1]
-                if tally.num_realizations != len(flux_batches) + 1 or tally.mean.size != 1:
-                    raise ValueError('Expected one scalar realization per batch')
-                current_sum = float(tally.results[:, :, 1].flat[0])
-                flux_batches.append(current_sum - previous_sum)
-                previous_sum = current_sum
-            openmc.lib.simulation_finalize()
+            sizer = (AdaptiveBatches(settings.adaptive_batches, settings.batches)
+                     if settings.adaptive_batches.enabled else None)
+            batches = record_batches(sizer=sizer)
         else:
             openmc.lib.run()
         if progress:
@@ -180,11 +175,11 @@ def worker(mesh_path, directory, settings, seed, budget, *, batch_scores=False, 
             'cross_sections': str(openmc.config['cross_sections']),
         }
         if batch_scores:
-            sample['batch_flux'] = np.asarray(flux_batches)
-            np.testing.assert_allclose(sample['batch_flux'].mean(), sample['tally_mean'],
-                                       rtol=1e-10, atol=1e-14)
-            np.testing.assert_allclose(sample['batch_flux'].std(ddof=1) / np.sqrt(n),
-                                       sample['tally_std_dev'], rtol=1e-7, atol=1e-14)
+            sample['batch_flux'] = batches['batch_flux'][:, 0]
+            for name in ('batch_gradient', 'batch_dJ', 'batch_datt'):
+                sample[name] = batches[name][:, :, 0].reshape(n, -1, 3)
+            if sizer is not None:
+                sample.update(sizer.arrays())
         openmc.lib.statepoint_write('evaluation.h5', write_source=False)
         with h5py.File('evaluation.h5') as statepoint:
             vertices = statepoint['tallies/meshes/mesh 1/vertices'][()]

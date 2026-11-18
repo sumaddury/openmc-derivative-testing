@@ -44,3 +44,6 @@ venv/
 /build/
 /dist/
 /*.egg-info/
+
+# TEMPORARY icosphere meshes standing in for Cubit (see icosphere_meshes/make_icosphere.py)
+/icosphere_meshes/

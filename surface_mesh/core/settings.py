@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import json
 import math
 from pathlib import Path
+from .adaptive_batches import AdaptiveBatchConfig
 from .model_defaults import BOX_CONTAINER_LOWER_CM, BOX_CONTAINER_UPPER_CM
 from .sampling import AdaptiveSamplingConfig
 
@@ -20,6 +21,9 @@ class IntRunSettings:
     seed: int = 5800001
     threads: int = 2
     paired_sampling: bool = False
+    record_batches: bool = False
+    # When enabled, `batches` is the limit and the batch count is chosen at runtime.
+    adaptive_batches: AdaptiveBatchConfig = field(default_factory=AdaptiveBatchConfig)
     flux_rel_err: float = .01
     trigger_max_factor: int = 1
     trigger_interval: int = 10
@@ -62,8 +66,14 @@ class IntRunSettings:
                 raise ValueError(f'{name} must be an integer >= {minimum}')
         if self.batches < 2:
             raise ValueError('Need at least two transport batches')
-        for name in ('paired_sampling', 'save_geometry_images', 'save_solid_geometry_images', 'save_vtk',
-                     'validate_geometry'):
+        if isinstance(self.adaptive_batches, dict):
+            object.__setattr__(self, 'adaptive_batches', AdaptiveBatchConfig(**self.adaptive_batches))
+        if not isinstance(self.adaptive_batches, AdaptiveBatchConfig):
+            raise TypeError('adaptive_batches requires AdaptiveBatchConfig or its JSON object')
+        if self.adaptive_batches.enabled and self.adaptive_batches.min_batches > self.batches:
+            raise ValueError('adaptive_batches.min_batches exceeds batches (the batch limit)')
+        for name in ('paired_sampling', 'record_batches', 'save_geometry_images',
+                     'save_solid_geometry_images', 'save_vtk', 'validate_geometry'):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f'{name} must be boolean')
         for name in ('flux_rel_err', 'container_radius', 'geometry_detail_width'):
